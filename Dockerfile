@@ -6,25 +6,25 @@ RUN npm install
 COPY . .
 RUN npm run build
 
-# Stage 2: Create the production image
-FROM node:20-alpine AS runner
+# Stage 2: Create the production image using Python
+FROM python:3.12-alpine AS runner
 WORKDIR /app
 
 # Install unzip for server-side archive extraction
 RUN apk add --no-cache unzip
 
 # Set environment
-ENV NODE_ENV=production
 ENV PORT=3000
+ENV PYTHONUNBUFFERED=1
 
 # Copy Tailscale CLI binary from the official image
 COPY --from=tailscale/tailscale:stable /usr/local/bin/tailscale /usr/local/bin/tailscale
 
-# Copy dependency manifests
-COPY package*.json ./
+# Copy Python requirements
+COPY requirements.txt ./
 
-# Install production dependencies only
-RUN npm install --omit=dev
+# Install python dependencies
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy compiled frontend from builder stage
 COPY --from=builder /app/dist ./dist
@@ -38,5 +38,5 @@ RUN mkdir -p uploads received
 # Expose server port
 EXPOSE 3000
 
-# Run Express server
-CMD ["node", "server/server.js"]
+# Run FastAPI server via uvicorn
+CMD ["uvicorn", "server.main:app", "--host", "0.0.0.0", "--port", "3000"]

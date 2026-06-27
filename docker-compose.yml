@@ -4,8 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: taildrop-app
-    ports:
-      - "3000:3000"
+    network_mode: "host"
     volumes:
       - /var/run/tailscale/tailscaled.sock:/var/run/tailscale/tailscaled.sock
       - ~/Downloads/Taildrop:/app/received

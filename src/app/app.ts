@@ -166,7 +166,7 @@ export class App implements OnInit, OnDestroy {
               
               // Push notification if permitted
               if (this.notificationsEnabled()) {
-                new Notification('File Received via Taildrop', {
+                new Notification('File Received', {
                   body: `Received "${file.filename}" (${this.formatBytes(file.size)})`,
                 });
               }
@@ -550,6 +550,12 @@ export class App implements OnInit, OnDestroy {
       minute: '2-digit',
       second: '2-digit'
     });
+  }
+
+  // Helper: Detect if peer is a LocalSend device
+  protected isLocalSend(peer: Peer | null): boolean {
+    if (!peer) return false;
+    return peer.id.startsWith('localsend-') || peer.relay === 'LocalSend Protocol';
   }
 
   // Helper: Get OS Icon class/color

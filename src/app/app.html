@@ -8,8 +8,8 @@
         </svg>
       </div>
       <div>
-        <h1>Taildrop Transfer</h1>
-        <p class="subtitle">Secure file sharing over your encrypted Tailnet</p>
+        <h1>MultiDrop Transfer</h1>
+        <p class="subtitle">Secure file sharing over your local network or Tailnet</p>
       </div>
     </div>
 
@@ -269,7 +269,7 @@
                   <div class="spinner-small" style="border-top-color: #ffffff;"></div>
                   <span>Sending files (sequentially)...</span>
                 } @else {
-                  <span>Send Queue via Taildrop</span>
+                  <span>Send Queue via {{ isLocalSend(selectedPeer()) ? 'LocalSend' : 'Taildrop' }}</span>
                   <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="2.5" stroke="currentColor">
                     <path stroke-linecap="round" stroke-linejoin="round" d="M6 12 3.269 3.125A59.769 59.769 0 0 1 21.485 12 59.768 59.768 0 0 1 3.27 20.875L5.999 12Zm0 0h7.5" />
                   </svg>
@@ -290,7 +290,7 @@
               </svg>
             </div>
             <h2>No device selected</h2>
-            <p>Choose an online device from the network catalog on the left to start transferring files securely via Taildrop.</p>
+            <p>Choose an online device from the network catalog on the left to start transferring files securely.</p>
           </div>
         }
       </div>
@@ -361,8 +361,8 @@
             @if (inboxFiles().length === 0) {
               <div class="empty-inbox-view">
                 <div class="empty-inbox-graphic">📥</div>
-                <h3>Your Taildrop inbox is empty</h3>
-                <p>Files sent to this machine from other devices on your Tailnet will appear here.</p>
+                <h3>Your inbox is empty</h3>
+                <p>Files sent to this machine from other devices on your network will appear here.</p>
               </div>
             }
           }

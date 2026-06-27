@@ -191,7 +191,7 @@ def test_localsend_info_endpoint():
     response = client.get("/api/localsend/v2/info")
     assert response.status_code == 200
     data = response.json()
-    assert data["alias"] == "Taildrop Web Server"
+    assert data["alias"] == "MultiDrop Web Server"
     assert data["fingerprint"] == MY_FINGERPRINT
 
 # 8. LocalSend Register API

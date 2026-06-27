@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 import httpx
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -58,6 +58,38 @@ def broadcast_presence():
         print(f"Error broadcasting presence: {e}")
     finally:
         sock.close()
+
+def register_back_sync(ip: str, port: int, protocol: str):
+    url = f"{protocol}://{ip}:{port}/api/localsend/v2/register"
+    payload = {
+        "alias": "MultiDrop Web Server",
+        "version": "2.0",
+        "deviceModel": "Python Backend",
+        "deviceType": "server",
+        "fingerprint": MY_FINGERPRINT,
+        "port": 3000,
+        "protocol": "http",
+        "download": True
+    }
+    try:
+        # Use verify=False because LocalSend always uses self-signed certs in HTTPS mode
+        with httpx.Client(verify=False, timeout=3.0) as client:
+            resp = client.post(url, json=payload)
+            if resp.status_code == 200:
+                print(f"Successfully registered back with LocalSend device at {ip}:{port}")
+                return
+    except Exception as e:
+        print(f"Failed to register back via LocalSend V2 with {ip}:{port}: {e}")
+        
+    # Fallback to V1
+    url_v1 = f"{protocol}://{ip}:{port}/api/localsend/v1/register"
+    try:
+        with httpx.Client(verify=False, timeout=3.0) as client:
+            resp = client.post(url_v1, json=payload)
+            if resp.status_code == 200:
+                print(f"Successfully registered back via LocalSend V1 with {ip}:{port}")
+    except Exception as e:
+        print(f"Failed to register back via LocalSend V1 with {ip}:{port}: {e}")
 
 def start_udp_listener():
     def listen():
@@ -119,6 +151,15 @@ def start_udp_listener():
                             "protocol": protocol,
                             "last_seen": time.time()
                         }
+
+                        # If they are broadcasting (announcement is true),
+                        # we register ourselves back to their HTTP server
+                        if payload.get("announcement") is True:
+                            threading.Thread(
+                                target=register_back_sync,
+                                args=(ip, port, protocol),
+                                daemon=True
+                            ).start()
                 except Exception:
                     pass
             except Exception as e:
@@ -651,7 +692,7 @@ async def extract_zip(filename: str):
 @app.get("/api/localsend/v1/info")
 async def localsend_info():
     return {
-        "alias": "Taildrop Web Server",
+        "alias": "MultiDrop Web Server",
         "version": "2.0",
         "deviceModel": "Python Backend",
         "deviceType": "server",
@@ -663,24 +704,24 @@ async def localsend_info():
 
 @app.post("/api/localsend/v2/register")
 @app.post("/api/localsend/v1/register")
-async def localsend_register(request: dict):
-    # Parse client details and add to known peers
-    alias = request.get("alias")
-    fingerprint = request.get("fingerprint")
+async def localsend_register(request_body: dict, request: Request):
+    client_ip = request.client.host
+    alias = request_body.get("alias")
+    fingerprint = request_body.get("fingerprint")
     if alias and fingerprint:
         localsend_peers[fingerprint] = {
-            "ip": "Unknown",  # Will be overridden on direct interaction or UDP updates
-            "port": request.get("port", 53317),
+            "ip": client_ip,
+            "port": request_body.get("port", 53317),
             "alias": alias,
-            "deviceModel": request.get("deviceModel", "Unknown"),
-            "deviceType": request.get("deviceType", "desktop"),
+            "deviceModel": request_body.get("deviceModel", "Unknown"),
+            "deviceType": request_body.get("deviceType", "desktop"),
             "fingerprint": fingerprint,
-            "protocol": request.get("protocol", "http"),
+            "protocol": request_body.get("protocol", "http"),
             "last_seen": time.time()
         }
     
     return {
-        "alias": "Taildrop Web Server",
+        "alias": "MultiDrop Web Server",
         "version": "2.0",
         "deviceModel": "Python Backend",
         "deviceType": "server",

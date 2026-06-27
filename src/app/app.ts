@@ -73,7 +73,9 @@ export class App implements OnInit, OnDestroy {
 
     // Check notification permission
     if ('Notification' in window) {
-      this.notificationsEnabled.set(Notification.permission === 'granted');
+      const isGranted = Notification.permission === 'granted';
+      const isDisabled = localStorage.getItem('notifications_disabled') === 'true';
+      this.notificationsEnabled.set(isGranted && !isDisabled);
     }
 
     // Start background sync every 5 seconds
@@ -88,12 +90,20 @@ export class App implements OnInit, OnDestroy {
     }
   }
 
-  // Request browser notification permission
+  // Request browser notification permission or toggle local state
   protected requestNotificationPermission() {
     if ('Notification' in window) {
-      Notification.requestPermission().then(permission => {
-        this.notificationsEnabled.set(permission === 'granted');
-      });
+      if (Notification.permission === 'granted') {
+        const nextState = !this.notificationsEnabled();
+        this.notificationsEnabled.set(nextState);
+        localStorage.setItem('notifications_disabled', String(!nextState));
+      } else {
+        Notification.requestPermission().then(permission => {
+          const isGranted = permission === 'granted';
+          this.notificationsEnabled.set(isGranted);
+          localStorage.setItem('notifications_disabled', String(!isGranted));
+        });
+      }
     } else {
       alert('Desktop notifications are not supported by this browser.');
     }

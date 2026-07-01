@@ -7,7 +7,7 @@ Goal: Implement the Transfer History & Logging feature using an SQLite backend a
 - [x] Task 2: Implement logging helper & log rotation
 - [x] Task 3: Backend API Endpoints & Hooks
 - [x] Task 4: Frontend Service Integration
-- [ ] Task 5: Frontend UI & Collapsible History Panel
+- [x] Task 5: Frontend UI & Collapsible History Panel
 - [ ] Task 6: Implement Frontend Retry Flow & Validations
 
 ## Progress Logs
@@ -17,3 +17,4 @@ Goal: Implement the Transfer History & Logging feature using an SQLite backend a
 - Task 2: complete (commits 55efa0a..e2e9a62, review clean)
 - Task 3: complete (commits bc36d67..c73f4b3, review clean)
 - Task 4: complete (commits c14e979..8997902, review clean)
+- Task 5: complete (commits 19c750f..c7173b5, review clean)

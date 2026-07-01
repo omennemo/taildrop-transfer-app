@@ -31,6 +31,21 @@ export interface InboxFile {
   receivedAt: string;
 }
 
+export interface TransferLog {
+  id: string;
+  filename: string;
+  size: number;
+  direction: 'send' | 'receive';
+  peer_id: string;
+  peer_name: string;
+  protocol: 'Taildrop' | 'LocalSend';
+  status: 'success' | 'failed' | 'in-progress';
+  timestamp: string;
+  speed_bps: number | null;
+  duration_ms: number | null;
+  error_msg: string | null;
+}
+
 @Injectable({
   providedIn: 'root'
 })
@@ -62,5 +77,13 @@ export class TaildropService {
 
   extractZip(filename: string): Observable<{ success: boolean; message: string; extractedFolder: string }> {
     return this.http.post<{ success: boolean; message: string; extractedFolder: string }>(`/api/extract/${encodeURIComponent(filename)}`, {});
+  }
+
+  getHistory(): Observable<TransferLog[]> {
+    return this.http.get<TransferLog[]>('/api/history');
+  }
+
+  clearHistory(): Observable<{ success: boolean }> {
+    return this.http.post<{ success: boolean }>('/api/history/clear', {});
   }
 }

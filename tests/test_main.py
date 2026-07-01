@@ -401,4 +401,92 @@ async def test_log_transfer_event(tmp_path):
             assert len(rows) == 0
 
 
+# 16. Test History Endpoints
+def test_history_endpoints():
+    with TestClient(app) as c:
+        # Clear history first
+        response = c.post("/api/history/clear")
+        assert response.status_code == 200
+        
+        # Get history list (should be empty)
+        response = c.get("/api/history")
+        assert response.status_code == 200
+        assert response.json() == []
+
+# 17. Test Logging Integration on Send
+@patch('server.main.upload_localsend', new_callable=AsyncMock)
+@patch('os.remove')
+def test_send_file_logging_integration(mock_remove, mock_upload_localsend):
+    localsend_peers["ls-fingerprint"] = {
+        "ip": "192.168.1.50",
+        "port": 53317,
+        "alias": "My Phone",
+        "deviceModel": "Pixel",
+        "deviceType": "mobile",
+        "fingerprint": "ls-fingerprint",
+        "protocol": "http",
+        "last_seen": time.time()
+    }
+    
+    with TestClient(app) as c:
+        # Clear first
+        c.post("/api/history/clear")
+        
+        file_content = b"hello integration tests"
+        files = {"file": ("test_integration.txt", file_content, "text/plain")}
+        data = {"target": "My Phone (LocalSend)"}
+        
+        response = c.post("/api/send", data=data, files=files)
+        assert response.status_code == 200
+        
+        # Verify it was logged in history
+        history_resp = c.get("/api/history")
+        assert history_resp.status_code == 200
+        history_data = history_resp.json()
+        assert len(history_data) == 1
+        assert history_data[0]["filename"] == "test_integration.txt"
+        assert history_data[0]["status"] == "success"
+        assert history_data[0]["direction"] == "send"
+        assert history_data[0]["protocol"] == "LocalSend"
+        assert history_data[0]["peer_name"] == "My Phone (LocalSend)"
+
+# 18. Test Logging Integration on LocalSend Upload
+@patch('shutil.copyfileobj')
+def test_localsend_upload_logging_integration(mock_copyfileobj):
+    # Setup mock active upload session
+    session_id = "mock-session-abc-integration"
+    token = "mock-token-xyz-integration"
+    localsend_sessions[session_id] = {
+        "files": {
+            "fid-1": {
+                "filename": "hello_rec.txt",
+                "size": 25,
+                "token": token
+            }
+        }
+    }
+    
+    with TestClient(app) as c:
+        # Clear first
+        c.post("/api/history/clear")
+        
+        file_content = b"some sample content text"
+        files = {"file": ("hello_rec.txt", file_content, "text/plain")}
+        
+        response = c.post(
+            f"/api/localsend/v2/upload?sessionId={session_id}&fileId=fid-1&token={token}",
+            files=files
+        )
+        assert response.status_code == 200
+        
+        # Verify it was logged in history
+        history_resp = c.get("/api/history")
+        assert history_resp.status_code == 200
+        history_data = history_resp.json()
+        assert len(history_data) == 1
+        assert history_data[0]["filename"] == "hello_rec.txt"
+        assert history_data[0]["status"] == "success"
+        assert history_data[0]["direction"] == "receive"
+        assert history_data[0]["protocol"] == "LocalSend"
+        assert history_data[0]["peer_name"] == "Test iPhone (LocalSend)"
 

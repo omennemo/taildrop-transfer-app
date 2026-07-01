@@ -545,75 +545,89 @@ async def send_file(target: str = Form(...), file: UploadFile = File(...)):
             ls_peer = p
             break
 
+    # For sends (Tailscale/LocalSend)
+    tx_id = f"tx-{int(time.time() * 1000)}-{random.randint(1000, 9999)}"
+    start_time = time.time()
+    log_data = {
+        "id": tx_id,
+        "filename": file.filename,
+        "size": file_size,
+        "direction": "send",
+        "peer_id": target,
+        "peer_name": target,
+        "protocol": "Taildrop",
+        "status": "in-progress",
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+    
     if ls_peer:
-        try:
+        log_data["peer_id"] = f"localsend-{ls_peer['fingerprint']}"
+        log_data["peer_name"] = f"{ls_peer['alias']} (LocalSend)"
+        log_data["protocol"] = "LocalSend"
+        
+    await log_transfer_event(log_data)
+
+    temp_dir = None
+    try:
+        if ls_peer:
             await upload_localsend(ls_peer, upload_file_path, file.filename, file_size, file.content_type)
-            if os.path.exists(upload_file_path):
-                os.remove(upload_file_path)
+        else:
+            # Standard Tailscale send workflow
+            temp_dir = os.path.join(UPLOADS_DIR, f"temp-{int(time.time() * 1000)}")
+            os.makedirs(temp_dir, exist_ok=True)
+            temp_file_path = os.path.join(temp_dir, file.filename)
+            shutil.copyfile(upload_file_path, temp_file_path)
+
+            target_with_colon = f"{target}:"
+            print(f"Sending file via tailscale file cp {temp_file_path} {target_with_colon}")
+
+            import asyncio
+            result = await asyncio.to_thread(
+                subprocess.run,
+                ["tailscale", "file", "cp", temp_file_path, target_with_colon],
+                capture_output=True,
+                text=True,
+                timeout=600.0
+            )
+            if result.returncode != 0:
+                stderr = result.stderr or ""
+                raise Exception(stderr or f"Process exited with code {result.returncode}")
+
+        # Log Success
+        duration = int((time.time() - start_time) * 1000)
+        speed = file_size / (duration / 1000.0) if duration > 0 else 0
+        log_data["status"] = "success"
+        log_data["speed_bps"] = speed
+        log_data["duration_ms"] = duration
+        await log_transfer_event(log_data)
+
+        # Cleanup
+        if os.path.exists(upload_file_path):
+            os.remove(upload_file_path)
+        if temp_dir and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
+
+        if ls_peer:
             return {"success": True, "message": f"Successfully sent {file.filename} to {ls_peer['alias']} via LocalSend"}
-        except Exception as e:
-            if os.path.exists(upload_file_path):
-                os.remove(upload_file_path)
-            print(f"LocalSend send file failed: {e}")
-            return JSONResponse(
-                status_code=500,
-                content={
-                    "error": "Failed to send file via LocalSend",
-                    "details": str(e)
-                }
-            )
+        else:
+            return {"success": True, "message": f"Successfully sent {file.filename} to {target}"}
 
-    # Standard Tailscale send workflow
-    temp_dir = os.path.join(UPLOADS_DIR, f"temp-{int(time.time() * 1000)}")
-    os.makedirs(temp_dir, exist_ok=True)
-    temp_file_path = os.path.join(temp_dir, file.filename)
-
-    try:
-        shutil.copyfile(upload_file_path, temp_file_path)
     except Exception as e:
+        # Cleanup
         if os.path.exists(upload_file_path):
             os.remove(upload_file_path)
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        raise HTTPException(status_code=500, detail=f"Failed to prepare file for transfer: {str(e)}")
+        if temp_dir and os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir, ignore_errors=True)
 
-    target_with_colon = f"{target}:"
-    print(f"Sending file via tailscale file cp {temp_file_path} {target_with_colon}")
+        # Log failure
+        log_data["status"] = "failed"
+        log_data["error_msg"] = str(e)
+        await log_transfer_event(log_data)
 
-    try:
-        import asyncio
-        result = await asyncio.to_thread(
-            subprocess.run,
-            ["tailscale", "file", "cp", temp_file_path, target_with_colon],
-            capture_output=True,
-            text=True,
-            timeout=600.0
-        )
-
-        if os.path.exists(upload_file_path):
-            os.remove(upload_file_path)
-        shutil.rmtree(temp_dir, ignore_errors=True)
-
-        if result.returncode != 0:
-            stderr = result.stderr or ""
-            print(f"Tailscale file cp error: {result.returncode}, {stderr}")
-            return JSONResponse(
-                status_code=500,
-                content={
-                    "error": "Failed to send file via Taildrop",
-                    "details": stderr or f"Process exited with code {result.returncode}"
-                }
-            )
-
-        return {"success": True, "message": f"Successfully sent {file.filename} to {target}"}
-    except Exception as e:
-        if os.path.exists(upload_file_path):
-            os.remove(upload_file_path)
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        print(f"Tailscale file cp exception: {e}")
         return JSONResponse(
             status_code=500,
             content={
-                "error": "Failed to send file via Taildrop",
+                "error": f"Failed to send file via {'LocalSend' if ls_peer else 'Taildrop'}",
                 "details": str(e)
             }
         )
@@ -822,6 +836,7 @@ async def localsend_upload(
     sessionId: str,
     fileId: str,
     token: str,
+    request: Request,
     file: UploadFile = File(...)
 ):
     session = localsend_sessions.get(sessionId)
@@ -835,14 +850,72 @@ async def localsend_upload(
     safe_filename = os.path.basename(file_info["filename"])
     dest_path = os.path.join(RECEIVED_DIR, safe_filename)
     
+    tx_id = f"tx-{int(time.time() * 1000)}-{random.randint(1000, 9999)}"
+    start_time = time.time()
+    
+    # Log incoming transfer as in-progress
+    log_data = {
+        "id": tx_id,
+        "filename": file_info["filename"],
+        "size": file_info["size"],
+        "direction": "receive",
+        "peer_id": "localsend-unknown", # fallback, will resolve if registration matches
+        "peer_name": "LocalSend Peer",
+        "protocol": "LocalSend",
+        "status": "in-progress",
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+    # Resolve actual registered peer if present
+    if request.client:
+        for p in localsend_peers.values():
+            if p["ip"] == request.client.host:
+                log_data["peer_id"] = f"localsend-{p['fingerprint']}"
+                log_data["peer_name"] = f"{p['alias']} (LocalSend)"
+                break
+            
+    await log_transfer_event(log_data)
+    
+    # Save file...
     try:
         with open(dest_path, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
+            
+        # Log success
+        duration = int((time.time() - start_time) * 1000)
+        speed = file_info["size"] / (duration / 1000.0) if duration > 0 else 0
+        log_data["status"] = "success"
+        log_data["speed_bps"] = speed
+        log_data["duration_ms"] = duration
+        await log_transfer_event(log_data)
     except Exception as e:
-        print(f"Error saving LocalSend file: {e}")
+        # Log failure
+        log_data["status"] = "failed"
+        log_data["error_msg"] = str(e)
+        await log_transfer_event(log_data)
         raise HTTPException(status_code=500, detail="Failed to save file")
         
     return {"success": True}
+@app.get("/api/history")
+async def get_history():
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM transfer_logs ORDER BY timestamp DESC LIMIT 500") as cursor:
+                rows = await cursor.fetchall()
+                return [dict(r) for r in rows]
+    except Exception as e:
+        print(f"Failed to read history logs: {e}")
+        return []
+
+@app.post("/api/history/clear")
+async def clear_history():
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute("DELETE FROM transfer_logs;")
+            await db.commit()
+        return {"success": True}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to clear history: {str(e)}")
 
 # Wildcard route to serve Angular SPA index.html for non-API routes
 @app.get("/{catchall:path}")

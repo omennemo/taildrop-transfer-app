@@ -305,3 +305,100 @@ async def test_get_db_connection(tmp_path):
             assert row[0] == "transfer_logs"
 
 
+# 15. Logging helper & log rotation test
+@pytest.mark.asyncio
+async def test_log_transfer_event(tmp_path):
+    test_db_path = os.path.join(tmp_path, "test_history.db")
+    from server.main import init_db, log_transfer_event
+    await init_db(test_db_path)
+
+    # Test Insertion with path traversal in filename
+    log_data = {
+        "id": "tx-12345",
+        "filename": "../../test_doc.pdf",
+        "size": 1000,
+        "direction": "send",
+        "peer_id": "peer-abc",
+        "peer_name": "Test Node",
+        "protocol": "LocalSend",
+        "status": "in-progress",
+        "timestamp": "2026-07-01T12:00:00.000Z"
+    }
+    await log_transfer_event(log_data, db_path=test_db_path)
+
+    async with aiosqlite.connect(test_db_path) as db:
+        async with db.execute("SELECT filename, status FROM transfer_logs WHERE id='tx-12345'") as cursor:
+            row = await cursor.fetchone()
+            assert row is not None
+            # Filename should be sanitized (path traversal removed)
+            assert row[0] == "test_doc.pdf"
+            assert row[1] == "in-progress"
+
+    # Test Upsert update
+    log_data["status"] = "success"
+    log_data["speed_bps"] = 500.0
+    await log_transfer_event(log_data, db_path=test_db_path)
+
+    async with aiosqlite.connect(test_db_path) as db:
+        async with db.execute("SELECT status, speed_bps FROM transfer_logs WHERE id='tx-12345'") as cursor:
+            row = await cursor.fetchone()
+            assert row[0] == "success"
+            assert row[1] == 500.0
+
+    # Test Log rotation / 500 record limit cap
+    # We will insert 505 logs. The oldest 5 logs (sorted by timestamp) should be deleted.
+    # Note: "tx-12345" has timestamp "2026-07-01T12:00:00.000Z"
+    # Let's insert 505 logs.
+    # We will generate timestamps like "2026-07-01T12:01:XX.000Z"
+    # To check that it correctly deletes the oldest, let's insert 5 logs with older timestamps first:
+    # "2026-07-01T11:00:00.000Z", etc.
+    # Then insert 500 logs with newer timestamps.
+    
+    # 1. Clear database first
+    async with aiosqlite.connect(test_db_path) as db:
+        await db.execute("DELETE FROM transfer_logs;")
+        await db.commit()
+
+    # 2. Insert 5 oldest logs
+    for i in range(5):
+        old_log = {
+            "id": f"old-tx-{i}",
+            "filename": f"old_file_{i}.txt",
+            "size": 100,
+            "direction": "send",
+            "peer_id": "peer-abc",
+            "peer_name": "Test Node",
+            "protocol": "LocalSend",
+            "status": "success",
+            "timestamp": f"2026-07-01T10:00:0{i}.000Z" # Oldest
+        }
+        await log_transfer_event(old_log, db_path=test_db_path)
+
+    # 3. Insert 500 newer logs (making total 505)
+    for i in range(500):
+        new_log = {
+            "id": f"new-tx-{i}",
+            "filename": f"new_file_{i}.txt",
+            "size": 200,
+            "direction": "receive",
+            "peer_id": "peer-xyz",
+            "peer_name": "Another Node",
+            "protocol": "Taildrop",
+            "status": "success",
+            "timestamp": f"2026-07-01T12:00:{i:02d}.000Z" if i < 60 else f"2026-07-01T13:00:{i%60:02d}.000Z" # Newer
+        }
+        await log_transfer_event(new_log, db_path=test_db_path)
+
+    # 4. Verify that total records is capped at 500
+    async with aiosqlite.connect(test_db_path) as db:
+        async with db.execute("SELECT COUNT(*) FROM transfer_logs") as cursor:
+            count_row = await cursor.fetchone()
+            assert count_row[0] == 500
+
+        # Verify that the old logs (old-tx-0 to old-tx-4) are deleted
+        async with db.execute("SELECT id FROM transfer_logs WHERE id LIKE 'old-tx-%'") as cursor:
+            rows = await cursor.fetchall()
+            assert len(rows) == 0
+
+
+

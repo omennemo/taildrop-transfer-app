@@ -466,6 +466,19 @@ def test_localsend_upload_logging_integration(mock_copyfileobj):
         }
     }
     
+    # Explicitly populate the peer to mock the client registry and resolve state leakage
+    localsend_peers.clear()
+    localsend_peers["iphone-fingerprint-777"] = {
+        "ip": "testclient",
+        "port": 53317,
+        "alias": "Test iPhone",
+        "deviceModel": "iPhone 15",
+        "deviceType": "mobile",
+        "fingerprint": "iphone-fingerprint-777",
+        "protocol": "http",
+        "last_seen": time.time()
+    }
+    
     with TestClient(app) as c:
         # Clear first
         c.post("/api/history/clear")

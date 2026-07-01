@@ -526,7 +526,7 @@ async def send_file(target: str = Form(...), file: UploadFile = File(...)):
 
     # Save the file to UPLOADS_DIR with a unique name first
     unique_suffix = f"{int(time.time() * 1000)}-{random.randint(0, int(1e9))}"
-    uploaded_filename = f"{unique_suffix}-{file.filename}"
+    uploaded_filename = f"{unique_suffix}-{os.path.basename(file.filename)}"
     upload_file_path = os.path.join(UPLOADS_DIR, uploaded_filename)
 
     try:
@@ -550,7 +550,7 @@ async def send_file(target: str = Form(...), file: UploadFile = File(...)):
     start_time = time.time()
     log_data = {
         "id": tx_id,
-        "filename": file.filename,
+        "filename": os.path.basename(file.filename),
         "size": file_size,
         "direction": "send",
         "peer_id": target,
@@ -570,12 +570,12 @@ async def send_file(target: str = Form(...), file: UploadFile = File(...)):
     temp_dir = None
     try:
         if ls_peer:
-            await upload_localsend(ls_peer, upload_file_path, file.filename, file_size, file.content_type)
+            await upload_localsend(ls_peer, upload_file_path, os.path.basename(file.filename), file_size, file.content_type)
         else:
             # Standard Tailscale send workflow
             temp_dir = os.path.join(UPLOADS_DIR, f"temp-{int(time.time() * 1000)}")
             os.makedirs(temp_dir, exist_ok=True)
-            temp_file_path = os.path.join(temp_dir, file.filename)
+            temp_file_path = os.path.join(temp_dir, os.path.basename(file.filename))
             shutil.copyfile(upload_file_path, temp_file_path)
 
             target_with_colon = f"{target}:"
@@ -608,9 +608,9 @@ async def send_file(target: str = Form(...), file: UploadFile = File(...)):
             shutil.rmtree(temp_dir, ignore_errors=True)
 
         if ls_peer:
-            return {"success": True, "message": f"Successfully sent {file.filename} to {ls_peer['alias']} via LocalSend"}
+            return {"success": True, "message": f"Successfully sent {os.path.basename(file.filename)} to {ls_peer['alias']} via LocalSend"}
         else:
-            return {"success": True, "message": f"Successfully sent {file.filename} to {target}"}
+            return {"success": True, "message": f"Successfully sent {os.path.basename(file.filename)} to {target}"}
 
     except Exception as e:
         # Cleanup

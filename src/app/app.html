@@ -281,6 +281,68 @@
             </div>
           }
 
+          <!-- History Log Section (Option A: Collapsible Split Panel) -->
+          <div class="history-section">
+            <div class="history-header" (click)="isHistoryCollapsed.set(!isHistoryCollapsed())">
+              <div class="history-title">
+                <span>🕒 Transfer History</span>
+                <span class="badge pending">{{ transferHistory().length }}</span>
+              </div>
+              <div class="history-header-actions" (click)="$event.stopPropagation()">
+                @if (transferHistory().length > 0) {
+                  <button class="btn-queue-action danger" (click)="clearHistory()">Clear History</button>
+                }
+                <span class="collapse-icon">{{ isHistoryCollapsed() ? '▼' : '▲' }}</span>
+              </div>
+            </div>
+
+            @if (!isHistoryCollapsed()) {
+              <div class="history-list">
+                @for (log of transferHistory(); track log.id) {
+                  <div class="queue-item-row" [class.success]="log.status === 'success'" [class.error]="log.status === 'failed'">
+                    <div class="queue-item-icon">
+                      {{ log.direction === 'send' ? '📤' : '📥' }}
+                    </div>
+                    <div class="queue-item-details">
+                      <span class="queue-item-name" [title]="log.filename">{{ log.filename }}</span>
+                      <span class="queue-item-meta">
+                        {{ formatBytes(log.size) }} • {{ log.peer_name }} via {{ log.protocol }}
+                        @if (log.speed_bps && log.status === 'success') {
+                          • {{ formatBytes(log.speed_bps) }}/s
+                        }
+                        @if (log.error_msg) {
+                          • <span class="queue-item-msg err" [title]="log.error_msg">{{ log.error_msg }}</span>
+                        }
+                      </span>
+                    </div>
+                    <div class="queue-item-status-col">
+                      @if (log.status === 'in-progress') {
+                        <div class="spinner-small"></div>
+                      } @else if (log.status === 'success') {
+                        <span class="badge success">Success</span>
+                      } @else {
+                        <span class="badge error">Failed</span>
+                      }
+                    </div>
+                    
+                    <div class="queue-item-action-col">
+                      @if (log.direction === 'send' && log.status === 'failed') {
+                        <button class="btn-remove-queue" (click)="retryTransfer(log)" title="Retry sending file">
+                          ↻
+                        </button>
+                      }
+                    </div>
+                  </div>
+                }
+                @if (transferHistory().length === 0) {
+                  <div class="empty-list-view" style="padding: 15px;">
+                    <p style="font-size: 11px;">No past transfers recorded.</p>
+                  </div>
+                }
+              </div>
+            }
+          </div>
+
         } @else {
           <!-- Select Peer Device State -->
           <div class="workspace-empty-state">

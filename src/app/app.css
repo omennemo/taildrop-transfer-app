@@ -1279,3 +1279,51 @@ h1 {
   height: 16px;
 }
 
+/* 4. Collapsible History Section */
+.history-section {
+  border-top: 1px solid var(--border-color);
+  padding-top: 16px;
+  margin-top: 16px;
+}
+
+.history-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  cursor: pointer;
+  padding: 6px 0;
+  user-select: none;
+}
+
+.history-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-heading);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-header);
+}
+
+.history-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.collapse-icon {
+  font-size: 10px;
+  color: var(--text-dimmed);
+}
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 220px;
+  overflow-y: auto;
+  margin-top: 10px;
+  padding-right: 4px;
+  animation: slideIn 0.2s ease-out;
+}
+

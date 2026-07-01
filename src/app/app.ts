@@ -1,5 +1,5 @@
 import { Component, signal, computed, inject, OnInit, OnDestroy } from '@angular/core';
-import { TaildropService, Self, Peer, InboxFile } from './taildrop.service';
+import { TaildropService, Self, Peer, InboxFile, TransferLog } from './taildrop.service';
 import JSZip from 'jszip';
 
 export interface QueueItem {
@@ -33,6 +33,8 @@ export class App implements OnInit, OnDestroy {
   protected readonly loadingInbox = signal<boolean>(true);
   protected readonly isDragging = signal<boolean>(false);
   protected readonly notificationsEnabled = signal<boolean>(false);
+  protected readonly transferHistory = signal<TransferLog[]>([]);
+  protected readonly isHistoryCollapsed = signal<boolean>(false);
 
   private refreshIntervalId: any = null;
   private knownFileNames = new Set<string>();
@@ -70,6 +72,7 @@ export class App implements OnInit, OnDestroy {
   ngOnInit() {
     this.fetchStatus();
     this.fetchInbox();
+    this.fetchHistory();
 
     // Check notification permission
     if ('Notification' in window) {
@@ -200,6 +203,26 @@ export class App implements OnInit, OnDestroy {
     });
   }
 
+  protected fetchHistory() {
+    this.taildropService.getHistory().subscribe({
+      next: (logs) => this.transferHistory.set(logs),
+      error: (err) => console.error('Failed to get history logs:', err)
+    });
+  }
+
+  protected clearHistory() {
+    if (confirm('Are you sure you want to clear your transfer history logs?')) {
+      this.taildropService.clearHistory().subscribe({
+        next: () => this.transferHistory.set([]),
+        error: (err) => alert('Failed to clear history')
+      });
+    }
+  }
+
+  protected retryTransfer(log: TransferLog) {
+    // Stub - will be fully implemented in Task 6
+  }
+
   // Silent background refresh
   private refreshData() {
     this.taildropService.getStatus().subscribe({
@@ -233,6 +256,7 @@ export class App implements OnInit, OnDestroy {
     });
 
     this.fetchInbox();
+    this.fetchHistory();
   }
 
   // User-initiated sync

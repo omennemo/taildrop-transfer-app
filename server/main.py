@@ -11,6 +11,7 @@ import threading
 from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 import httpx
+import aiosqlite
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -31,6 +32,34 @@ STATIC_DIR = os.path.join(WORKSPACE_DIR, "dist/taildrop-app/browser")
 # Ensure directories exist
 os.makedirs(UPLOADS_DIR, exist_ok=True)
 os.makedirs(RECEIVED_DIR, exist_ok=True)
+
+DB_PATH = os.path.join(WORKSPACE_DIR, "transfer_history.db")
+
+async def init_db(db_path=DB_PATH):
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute("PRAGMA journal_mode=WAL;")
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS transfer_logs (
+                id TEXT PRIMARY KEY,
+                filename TEXT NOT NULL,
+                size INTEGER NOT NULL,
+                direction TEXT CHECK(direction IN ('send', 'receive')) NOT NULL,
+                peer_id TEXT NOT NULL,
+                peer_name TEXT NOT NULL,
+                protocol TEXT CHECK(protocol IN ('Taildrop', 'LocalSend')) NOT NULL,
+                status TEXT CHECK(status IN ('success', 'failed', 'in-progress')) NOT NULL,
+                timestamp TEXT NOT NULL,
+                speed_bps REAL,
+                duration_ms INTEGER,
+                error_msg TEXT
+            );
+        """)
+        await db.commit()
+
+@asynccontextmanager
+async def get_db_connection(db_path=DB_PATH):
+    async with aiosqlite.connect(db_path) as db:
+        yield db
 
 # UDP Multicast functions for LocalSend Discovery
 def broadcast_presence():
@@ -247,10 +276,12 @@ async def upload_localsend(peer, file_path, original_filename, file_size, mime_t
 # Lifespan context manager for FastAPI startup/shutdown events
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: start UDP listener and send initial broadcast
+    # Startup: init database, start UDP listener, broadcast presence
+    await init_db()
     start_udp_listener()
     broadcast_presence()
     yield
+
     # Shutdown: clean up if needed
     pass
 

@@ -270,3 +270,38 @@ def test_download_file_not_found():
 def test_delete_file_not_found():
     response = client.delete("/api/inbox/nonexistent-file.pdf")
     assert response.status_code == 404
+
+# 13. Database initialization test
+import sqlite3
+import aiosqlite
+
+@pytest.mark.asyncio
+async def test_db_initialization(tmp_path):
+    test_db_path = os.path.join(tmp_path, "test_history.db")
+    from server.main import init_db
+    # Call init_db pointing to test database path
+    await init_db(test_db_path)
+    
+    # Assert table exists using sqlite3 connection
+    conn = sqlite3.connect(test_db_path)
+    cursor = conn.cursor()
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='transfer_logs';")
+    table = cursor.fetchone()
+    assert table is not None
+    assert table[0] == "transfer_logs"
+    conn.close()
+
+# 14. Database connection context manager test
+@pytest.mark.asyncio
+async def test_get_db_connection(tmp_path):
+    test_db_path = os.path.join(tmp_path, "test_history.db")
+    from server.main import init_db, get_db_connection
+    await init_db(test_db_path)
+    
+    async with get_db_connection(test_db_path) as db:
+        async with db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='transfer_logs';") as cursor:
+            row = await cursor.fetchone()
+            assert row is not None
+            assert row[0] == "transfer_logs"
+
+

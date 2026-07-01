@@ -219,8 +219,50 @@ export class App implements OnInit, OnDestroy {
     }
   }
 
+  // Retry helper method
   protected retryTransfer(log: TransferLog) {
-    // Stub - will be fully implemented in Task 6
+    // 1. Peer online check
+    const destPeer = this.peers().find(p => p.id === log.peer_id || p.hostName === log.peer_id || p.hostName === log.peer_name.replace(' (LocalSend)', ''));
+    if (!destPeer) {
+      alert(`Cannot retry: Target device "${log.peer_name}" is no longer on the network.`);
+      return;
+    }
+    if (!destPeer.online) {
+      alert(`Cannot retry: Target device "${destPeer.hostName}" is currently offline.`);
+      return;
+    }
+
+    // 2. Setup file picker validation
+    const fileInput = document.createElement('input');
+    fileInput.type = 'file';
+    fileInput.onchange = (event: Event) => {
+      const input = event.target as HTMLInputElement;
+      if (input.files && input.files.length > 0) {
+        const selectedFile = input.files[0];
+        
+        // Validate name and size
+        if (selectedFile.name !== log.filename) {
+          alert(`File mismatch: Please select "${log.filename}" (you selected "${selectedFile.name}").`);
+          return;
+        }
+        if (selectedFile.size !== log.size) {
+          alert(`File size mismatch: Please select the original "${log.filename}" of size ${this.formatBytes(log.size)}.`);
+          return;
+        }
+
+        // Set matching peer and add real file to queue
+        this.selectedPeer.set(destPeer);
+        this.addFilesToQueue([selectedFile]);
+        
+        // Trigger queue transfer
+        setTimeout(() => {
+          this.triggerQueueTransfer();
+        }, 100);
+      }
+    };
+
+    // Click file picker programmatically
+    fileInput.click();
   }
 
   // Silent background refresh

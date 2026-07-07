@@ -1,5 +1,9 @@
 import sys
 import os
+
+# Set TAILDROP_DB_PATH for tests before importing main/app to avoid mutating production DB
+os.environ["TAILDROP_DB_PATH"] = "test_history_run.db"
+
 import time
 import pytest
 from unittest.mock import patch, MagicMock, AsyncMock
@@ -11,6 +15,24 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from server.main import app, localsend_peers, localsend_sessions, MY_FINGERPRINT
 
 client = TestClient(app)
+
+@pytest.fixture(scope="session", autouse=True)
+def cleanup_test_db():
+    # Initialize the test database schema before running any tests
+    import asyncio
+    from server.main import init_db
+    asyncio.run(init_db())
+    
+    yield
+    for suffix in ["", "-wal", "-shm"]:
+        db_file = f"test_history_run.db{suffix}"
+        if os.path.exists(db_file):
+            try:
+                os.remove(db_file)
+            except Exception as e:
+                print(f"Error removing {db_file}: {e}")
+
+
 
 # Dummy test data for Tailscale local API status and targets
 MOCK_STATUS_DATA = {

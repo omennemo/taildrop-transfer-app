@@ -327,10 +327,11 @@
                     
                     <div class="queue-item-action-col">
                       @if (log.direction === 'send' && log.status === 'failed') {
-                        <button class="btn-remove-queue" (click)="retryTransfer(log)" title="Retry sending file">
+                        <button class="btn-retry-action" (click)="retryTransfer(log)" title="Retry sending file">
                           ↻
                         </button>
                       }
+
                     </div>
                   </div>
                 }

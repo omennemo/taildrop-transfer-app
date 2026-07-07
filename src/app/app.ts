@@ -222,7 +222,7 @@ export class App implements OnInit, OnDestroy {
   // Retry helper method
   protected retryTransfer(log: TransferLog) {
     // 1. Peer online check
-    const destPeer = this.peers().find(p => p.id === log.peer_id || p.hostName === log.peer_id || p.hostName === log.peer_name.replace(' (LocalSend)', ''));
+    const destPeer = this.peers().find(p => p.id === log.peer_id || p.hostName === log.peer_id || p.hostName.replace(' (LocalSend)', '') === log.peer_name.replace(' (LocalSend)', ''));
     if (!destPeer) {
       alert(`Cannot retry: Target device "${log.peer_name}" is no longer on the network.`);
       return;

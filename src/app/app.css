@@ -704,6 +704,36 @@ h1 {
   height: 14px;
 }
 
+.btn-retry-action {
+  background: transparent;
+  border: none;
+  color: var(--text-dimmed);
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-retry-action:hover:not(:disabled) {
+  background: rgba(99, 102, 241, 0.1);
+  color: var(--primary);
+}
+
+.btn-retry-action:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+.btn-retry-action svg {
+  width: 14px;
+  height: 14px;
+}
+
+
 /* Status Alert notifications */
 .status-alert {
   display: flex;

@@ -33,7 +33,7 @@ STATIC_DIR = os.path.join(WORKSPACE_DIR, "dist/taildrop-app/browser")
 os.makedirs(UPLOADS_DIR, exist_ok=True)
 os.makedirs(RECEIVED_DIR, exist_ok=True)
 
-DB_PATH = os.path.join(WORKSPACE_DIR, "transfer_history.db")
+DB_PATH = os.environ.get("TAILDROP_DB_PATH", os.path.join(WORKSPACE_DIR, "transfer_history.db"))
 
 async def init_db(db_path=DB_PATH):
     async with aiosqlite.connect(db_path) as db:
@@ -54,7 +54,9 @@ async def init_db(db_path=DB_PATH):
                 error_msg TEXT
             );
         """)
+        await db.execute("CREATE INDEX IF NOT EXISTS idx_transfer_logs_timestamp ON transfer_logs (timestamp);")
         await db.commit()
+
 
 @asynccontextmanager
 async def get_db_connection(db_path=DB_PATH):
@@ -65,30 +67,34 @@ async def log_transfer_event(log: dict, db_path=DB_PATH) -> None:
     # Sanitize path traversal in filenames
     filename = os.path.basename(log.get("filename", "unknown"))
     
-    async with aiosqlite.connect(db_path) as db:
-        await db.execute("""
-            INSERT INTO transfer_logs (
-                id, filename, size, direction, peer_id, peer_name, 
-                protocol, status, timestamp, speed_bps, duration_ms, error_msg
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                status=excluded.status,
-                speed_bps=excluded.speed_bps,
-                duration_ms=excluded.duration_ms,
-                error_msg=excluded.error_msg;
-        """, (
-            log["id"], filename, log["size"], log["direction"], log["peer_id"], log["peer_name"],
-            log["protocol"], log["status"], log["timestamp"], log.get("speed_bps"),
-            log.get("duration_ms"), log.get("error_msg")
-        ))
-        
-        # Enforce 500 limit cap (Delete oldest rows outside limit)
-        await db.execute("""
-            DELETE FROM transfer_logs WHERE id NOT IN (
-                SELECT id FROM transfer_logs ORDER BY timestamp DESC LIMIT 500
-            );
-        """)
-        await db.commit()
+    try:
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute("""
+                INSERT INTO transfer_logs (
+                    id, filename, size, direction, peer_id, peer_name, 
+                    protocol, status, timestamp, speed_bps, duration_ms, error_msg
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    status=excluded.status,
+                    speed_bps=excluded.speed_bps,
+                    duration_ms=excluded.duration_ms,
+                    error_msg=excluded.error_msg;
+            """, (
+                log["id"], filename, log["size"], log["direction"], log["peer_id"], log["peer_name"],
+                log["protocol"], log["status"], log["timestamp"], log.get("speed_bps"),
+                log.get("duration_ms"), log.get("error_msg")
+            ))
+            
+            # Enforce 500 limit cap (Delete oldest rows outside limit)
+            await db.execute("""
+                DELETE FROM transfer_logs WHERE id NOT IN (
+                    SELECT id FROM transfer_logs ORDER BY timestamp DESC LIMIT 500
+                );
+            """)
+            await db.commit()
+    except Exception as e:
+        print(f"Database logging failed: {e}")
+
 
 # UDP Multicast functions for LocalSend Discovery
 def broadcast_presence():

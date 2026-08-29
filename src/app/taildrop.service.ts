@@ -56,6 +56,10 @@ export class TaildropService {
     return this.http.get<{ self: Self; peers: Peer[] }>('/api/status');
   }
 
+  scanNetwork(): Observable<{ self: Self; peers: Peer[] }> {
+    return this.http.post<{ self: Self; peers: Peer[] }>('/api/scan', {});
+  }
+
   getInbox(): Observable<InboxFile[]> {
     return this.http.get<InboxFile[]>('/api/inbox');
   }

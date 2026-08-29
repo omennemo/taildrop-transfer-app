@@ -123,6 +123,52 @@ def broadcast_presence():
     finally:
         sock.close()
 
+async def scan_local_subnet():
+    """Asynchronously scan the local IPv4 subnet on port 53317 for LocalSend endpoints."""
+    def get_local_subnet_base():
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            parts = ip.split(".")
+            if len(parts) == 4 and not ip.startswith("127."):
+                return f"{parts[0]}.{parts[1]}.{parts[2]}."
+        except Exception:
+            pass
+        return None
+
+    subnet_prefix = get_local_subnet_base()
+    if not subnet_prefix:
+        return
+
+    async def probe_ip(ip_str: str, client: httpx.AsyncClient):
+        for protocol in ["http", "https"]:
+            url_v2 = f"{protocol}://{ip_str}:53317/api/localsend/v2/info"
+            try:
+                resp = await client.get(url_v2, timeout=0.8)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    fp = data.get("fingerprint")
+                    if fp and fp != MY_FINGERPRINT:
+                        localsend_peers[fp] = {
+                            "ip": ip_str,
+                            "port": 53317,
+                            "alias": data.get("alias", f"LocalSend ({ip_str})"),
+                            "deviceModel": data.get("deviceModel", "Unknown"),
+                            "deviceType": data.get("deviceType", "desktop"),
+                            "fingerprint": fp,
+                            "protocol": protocol,
+                            "last_seen": time.time()
+                        }
+                        return
+            except Exception:
+                pass
+
+    async with httpx.AsyncClient(verify=False) as client:
+        tasks = [probe_ip(f"{subnet_prefix}{i}", client) for i in range(1, 255)]
+        await asyncio.gather(*tasks, return_exceptions=True)
+
 def register_back_sync(ip: str, port: int, protocol: str):
     url = f"{protocol}://{ip}:{port}/api/localsend/v2/register"
     payload = {
@@ -438,6 +484,13 @@ async def get_status():
                 "details": str(e)
             }
         )
+
+# Endpoint: Trigger network scan (Tailscale + LocalSend Subnet)
+@app.post("/api/scan")
+async def scan_network():
+    broadcast_presence()
+    await scan_local_subnet()
+    return await get_status()
 
 # Endpoint: Ping a peer to get latency
 @app.get("/api/ping/{peer}")

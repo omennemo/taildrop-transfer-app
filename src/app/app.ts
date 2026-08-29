@@ -1,4 +1,6 @@
-import { Component, signal, computed, inject, OnInit, OnDestroy } from '@angular/core';
+import { Component, signal, computed, inject, OnInit, OnDestroy, effect, untracked } from '@angular/core';
+import { rxResource } from '@angular/core/rxjs-interop';
+import { HttpClient } from '@angular/common/http';
 import { TaildropService, Self, Peer, InboxFile, TransferLog } from './taildrop.service';
 import JSZip from 'jszip';
 
@@ -7,6 +9,13 @@ export interface QueueItem {
   file: File;
   status: 'pending' | 'sending' | 'success' | 'error';
   message: string;
+}
+
+interface PeerLatencyState {
+  latency: number | null;
+  pinging: boolean;
+  curAddr?: string | null;
+  relay?: string | null;
 }
 
 @Component({
@@ -18,23 +27,74 @@ export interface QueueItem {
 })
 export class App implements OnInit, OnDestroy {
   private readonly taildropService = inject(TaildropService);
+  private readonly http = inject(HttpClient);
 
-  // Core signals for application state
-  protected readonly selfDevice = signal<Self | null>(null);
-  protected readonly peers = signal<Peer[]>([]);
-  protected readonly inboxFiles = signal<InboxFile[]>([]);
-  protected readonly searchQuery = signal<string>('');
-  protected readonly selectedPeer = signal<Peer | null>(null);
-  protected readonly selectedFiles = signal<QueueItem[]>([]);
-  
+  // Signal-based resources using rxResource.
+  // NOTE: no `params` here on purpose — these are polled via `.reload()` (see ngOnInit),
+  // which keeps the previous value visible while refetching. If a changing signal is ever
+  // passed as `params` instead, Angular treats each change as a brand new request and resets
+  // `.value()` to undefined while it loads, which flashes the whole UI back to its
+  // loading/empty state on every poll tick.
+  protected readonly statusResource = rxResource<{ self: Self; peers: Peer[] }, unknown>({
+    stream: () => this.http.get<{ self: Self; peers: Peer[] }>('/api/status'),
+  });
+
+  protected readonly inboxResource = rxResource<InboxFile[], unknown>({
+    stream: () => this.http.get<InboxFile[]>('/api/inbox'),
+  });
+
+  protected readonly historyResource = rxResource<TransferLog[], unknown>({
+    stream: () => this.http.get<TransferLog[]>('/api/history'),
+  });
+
+  // Derived state from resources
+  protected readonly selfDevice = computed(() => this.statusResource.value()?.self ?? null);
+  protected readonly rawPeers = computed(() => this.statusResource.value()?.peers ?? []);
+
+  // Peer latency states (updated by pingDevice)
+  private readonly peerLatencies = signal<Map<string, PeerLatencyState>>(new Map());
+
+  // Merged peers: raw peers + latency states
+  protected readonly mergedPeers = computed(() => {
+    const peers = this.rawPeers();
+    const latencies = this.peerLatencies();
+    return peers.map((peer: Peer) => {
+      const latencyState = latencies.get(peer.id);
+      return {
+        ...peer,
+        latency: latencyState?.latency ?? null,
+        pinging: latencyState?.pinging ?? false,
+        curAddr: latencyState?.latency ? (latencyState.curAddr ?? peer.curAddr) : peer.curAddr,
+        relay: latencyState?.latency ? (latencyState.relay ?? peer.relay) : peer.relay,
+      };
+    });
+  });
+
+  // Inbox files from resource
+  protected readonly inboxFiles = computed(() => this.inboxResource.value() ?? []);
+
+  // Transfer history from resource
+  protected readonly transferHistory = computed(() => this.historyResource.value() ?? []);
+
   // UI states
+  protected readonly searchQuery = signal<string>('');
+  protected readonly selectedPeerId = signal<string | null>(null);
+  protected readonly selectedPeer = computed(() => {
+    const id = this.selectedPeerId();
+    if (!id) return null;
+    return this.mergedPeers().find((p: Peer) => p.id === id) ?? null;
+  });
+  protected readonly selectedFiles = signal<QueueItem[]>([]);
   protected readonly isTransferring = signal<boolean>(false);
-  protected readonly loadingStatus = signal<boolean>(true);
-  protected readonly loadingInbox = signal<boolean>(true);
   protected readonly isDragging = signal<boolean>(false);
   protected readonly notificationsEnabled = signal<boolean>(false);
-  protected readonly transferHistory = signal<TransferLog[]>([]);
   protected readonly isHistoryCollapsed = signal<boolean>(false);
+
+  // Loading & Scanning states
+  protected readonly isScanning = signal<boolean>(false);
+  protected readonly loadingInbox = signal<boolean>(true);
+
+  protected readonly onlineCount = computed(() => this.mergedPeers().filter((p: Peer) => p.online).length);
 
   private refreshIntervalId: any = null;
   private knownFileNames = new Set<string>();
@@ -43,11 +103,10 @@ export class App implements OnInit, OnDestroy {
   // Computed signal to filter peers based on search query
   protected readonly filteredPeers = computed(() => {
     const query = this.searchQuery().toLowerCase().trim();
-    const allPeers = this.peers();
-    
+    const allPeers = this.mergedPeers();
+
     if (!query) {
-      // Sort online peers first, then alphabetically
-      return [...allPeers].sort((a, b) => {
+      return [...allPeers].sort((a: Peer, b: Peer) => {
         if (a.online === b.online) {
           return a.hostName.localeCompare(b.hostName);
         }
@@ -56,12 +115,12 @@ export class App implements OnInit, OnDestroy {
     }
 
     return allPeers
-      .filter(peer => 
-        peer.hostName.toLowerCase().includes(query) || 
+      .filter((peer: Peer) =>
+        peer.hostName.toLowerCase().includes(query) ||
         (peer.ip && peer.ip.includes(query)) ||
         peer.os.toLowerCase().includes(query)
       )
-      .sort((a, b) => {
+      .sort((a: Peer, b: Peer) => {
         if (a.online === b.online) {
           return a.hostName.localeCompare(b.hostName);
         }
@@ -69,10 +128,67 @@ export class App implements OnInit, OnDestroy {
       });
   });
 
+  protected scanNetwork() {
+    this.isScanning.set(true);
+    this.taildropService.scanNetwork().subscribe({
+      next: () => {
+        this.statusResource.reload();
+        this.isScanning.set(false);
+      },
+      error: (err) => {
+        console.error('Network scan failed:', err);
+        this.statusResource.reload();
+        this.isScanning.set(false);
+      }
+    });
+  }
+
   ngOnInit() {
-    this.fetchStatus();
-    this.fetchInbox();
-    this.fetchHistory();
+    // Start background polling every 5 seconds. Reload the existing resources in place
+    // (rather than changing a `params` signal) so the previously loaded data stays on
+    // screen while the refetch is in flight, instead of the UI flashing to empty/loading.
+    this.refreshIntervalId = setInterval(() => {
+      this.statusResource.reload();
+      this.inboxResource.reload();
+      this.historyResource.reload();
+    }, 5000);
+
+    // Effect: Clear loading inbox when inbox data arrives
+    effect(() => {
+      if (this.inboxResource.status() === 'resolved') {
+        this.loadingInbox.set(false);
+      }
+    });
+
+    // Effect: Delta notification checking for new files
+    effect(() => {
+      const files = this.inboxResource.value();
+      if (!files) return;
+
+      if (this.isInitialInboxLoad) {
+        this.knownFileNames = new Set(files.map((f: InboxFile) => f.filename));
+        this.isInitialInboxLoad = false;
+        return;
+      }
+
+      let foundNew = false;
+      for (const file of files) {
+        if (!this.knownFileNames.has(file.filename)) {
+          foundNew = true;
+          untracked(() => {
+            if (this.notificationsEnabled()) {
+              new Notification('File Received', {
+                body: `Received "${file.filename}" (${this.formatBytes(file.size)})`,
+              });
+            }
+          });
+        }
+      }
+      if (foundNew) {
+        this.playChime();
+      }
+      this.knownFileNames = new Set(files.map((f: InboxFile) => f.filename));
+    });
 
     // Check notification permission
     if ('Notification' in window) {
@@ -80,11 +196,6 @@ export class App implements OnInit, OnDestroy {
       const isDisabled = localStorage.getItem('notifications_disabled') === 'true';
       this.notificationsEnabled.set(isGranted && !isDisabled);
     }
-
-    // Start background sync every 5 seconds
-    this.refreshIntervalId = setInterval(() => {
-      this.refreshData();
-    }, 5000);
   }
 
   ngOnDestroy() {
@@ -93,7 +204,6 @@ export class App implements OnInit, OnDestroy {
     }
   }
 
-  // Request browser notification permission or toggle local state
   protected requestNotificationPermission() {
     if ('Notification' in window) {
       if (Notification.permission === 'granted') {
@@ -112,27 +222,25 @@ export class App implements OnInit, OnDestroy {
     }
   }
 
-  // Synthesize notification chime using Web Audio API
   private playChime() {
     try {
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
       if (!AudioContextClass) return;
-      
+
       const ctx = new AudioContextClass();
       const osc = ctx.createOscillator();
       const gain = ctx.createGain();
-      
+
       osc.type = 'sine';
-      // Play E5 (659.25 Hz) then A5 (880.00 Hz)
       osc.frequency.setValueAtTime(659.25, ctx.currentTime);
       osc.frequency.setValueAtTime(880.00, ctx.currentTime + 0.12);
-      
+
       gain.gain.setValueAtTime(0.12, ctx.currentTime);
       gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.5);
-      
+
       osc.connect(gain);
       gain.connect(ctx.destination);
-      
+
       osc.start();
       osc.stop(ctx.currentTime + 0.5);
     } catch (err) {
@@ -140,89 +248,17 @@ export class App implements OnInit, OnDestroy {
     }
   }
 
-  // Fetch status of self and peers
-  protected fetchStatus() {
-    this.taildropService.getStatus().subscribe({
-      next: (data) => {
-        this.selfDevice.set(data.self);
-        
-        // Update peer list while keeping the selected peer reference updated
-        const oldSelected = this.selectedPeer();
-        this.peers.set(data.peers);
-        
-        if (oldSelected) {
-          const updatedPeer = data.peers.find(p => p.id === oldSelected.id);
-          if (updatedPeer) {
-            this.selectedPeer.set(updatedPeer);
-          }
-        }
-        this.loadingStatus.set(false);
-      },
-      error: (err) => {
-        console.error('Failed to get status:', err);
-        this.loadingStatus.set(false);
-      }
-    });
-  }
-
-  // Fetch received files in the inbox with delta notification checking
-  protected fetchInbox() {
-    this.taildropService.getInbox().subscribe({
-      next: (files) => {
-        const newFileNames = new Set(files.map(f => f.filename));
-
-        if (!this.isInitialInboxLoad) {
-          let foundNew = false;
-          for (const file of files) {
-            if (!this.knownFileNames.has(file.filename)) {
-              foundNew = true;
-              
-              // Push notification if permitted
-              if (this.notificationsEnabled()) {
-                new Notification('File Received', {
-                  body: `Received "${file.filename}" (${this.formatBytes(file.size)})`,
-                });
-              }
-            }
-          }
-          if (foundNew) {
-            this.playChime();
-          }
-        } else {
-          this.isInitialInboxLoad = false;
-        }
-
-        this.knownFileNames = newFileNames;
-        this.inboxFiles.set(files);
-        this.loadingInbox.set(false);
-      },
-      error: (err) => {
-        console.error('Failed to get inbox:', err);
-        this.loadingInbox.set(false);
-      }
-    });
-  }
-
-  protected fetchHistory() {
-    this.taildropService.getHistory().subscribe({
-      next: (logs) => this.transferHistory.set(logs),
-      error: (err) => console.error('Failed to get history logs:', err)
-    });
-  }
-
   protected clearHistory() {
     if (confirm('Are you sure you want to clear your transfer history logs?')) {
       this.taildropService.clearHistory().subscribe({
-        next: () => this.transferHistory.set([]),
-        error: (err) => alert('Failed to clear history')
+        next: () => this.historyResource.reload(),
+        error: () => alert('Failed to clear history')
       });
     }
   }
 
-  // Retry helper method
   protected retryTransfer(log: TransferLog) {
-    // 1. Peer online check
-    const destPeer = this.peers().find(p => p.id === log.peer_id || p.hostName === log.peer_id || p.hostName.replace(' (LocalSend)', '') === log.peer_name.replace(' (LocalSend)', ''));
+    const destPeer = this.mergedPeers().find((p: Peer) => p.id === log.peer_id || p.hostName === log.peer_id || p.hostName.replace(' (LocalSend)', '') === log.peer_name.replace(' (LocalSend)', ''));
     if (!destPeer) {
       alert(`Cannot retry: Target device "${log.peer_name}" is no longer on the network.`);
       return;
@@ -232,15 +268,13 @@ export class App implements OnInit, OnDestroy {
       return;
     }
 
-    // 2. Setup file picker validation
     const fileInput = document.createElement('input');
     fileInput.type = 'file';
     fileInput.onchange = (event: Event) => {
       const input = event.target as HTMLInputElement;
       if (input.files && input.files.length > 0) {
         const selectedFile = input.files[0];
-        
-        // Validate name and size
+
         if (selectedFile.name !== log.filename) {
           alert(`File mismatch: Please select "${log.filename}" (you selected "${selectedFile.name}").`);
           return;
@@ -250,105 +284,66 @@ export class App implements OnInit, OnDestroy {
           return;
         }
 
-        // Set matching peer and add real file to queue
-        this.selectedPeer.set(destPeer);
+        this.selectedPeerId.set(destPeer.id);
         this.addFilesToQueue([selectedFile]);
-        
-        // Trigger queue transfer
+
         setTimeout(() => {
           this.triggerQueueTransfer();
         }, 100);
       }
     };
 
-    // Click file picker programmatically
     fileInput.click();
   }
 
-  // Silent background refresh
-  private refreshData() {
-    this.taildropService.getStatus().subscribe({
-      next: (data) => {
-        this.selfDevice.set(data.self);
-        // Preserve latency & pinging UI states when background status refreshes
-        const currentPeers = this.peers();
-        const updatedPeers = data.peers.map(np => {
-          const matchingOld = currentPeers.find(op => op.id === np.id);
-          if (matchingOld) {
-            return {
-              ...np,
-              latency: matchingOld.latency,
-              pinging: matchingOld.pinging,
-              curAddr: matchingOld.latency ? matchingOld.curAddr : np.curAddr,
-              relay: matchingOld.latency ? matchingOld.relay : np.relay
-            };
-          }
-          return np;
-        });
-
-        this.peers.set(updatedPeers);
-        const oldSelected = this.selectedPeer();
-        if (oldSelected) {
-          const updatedPeer = updatedPeers.find(p => p.id === oldSelected.id);
-          if (updatedPeer) {
-            this.selectedPeer.set(updatedPeer);
-          }
-        }
-      }
-    });
-
-    this.fetchInbox();
-    this.fetchHistory();
-  }
-
-  // User-initiated sync
   protected syncInbox() {
     this.loadingInbox.set(true);
-    this.fetchInbox();
+    this.inboxResource.reload();
   }
 
-  // Handle peer selection
   protected selectPeer(peer: Peer) {
-    this.selectedPeer.set(peer);
+    this.selectedPeerId.set(peer.id);
   }
 
-  // Update search query signal
   protected onSearchInput(event: Event) {
     const input = event.target as HTMLInputElement;
     this.searchQuery.set(input.value);
   }
 
-  // Trigger peer ping latency checker
   protected pingDevice(peer: Peer, event: Event) {
-    event.stopPropagation(); // Avoid triggering device selection on card click
+    event.stopPropagation();
     if (peer.pinging) return;
 
-    this.peers.update(list => 
-      list.map(p => p.id === peer.id ? { ...p, pinging: true } : p)
-    );
+    this.peerLatencies.update(map => {
+      const newMap = new Map(map);
+      newMap.set(peer.id, { latency: null, pinging: true });
+      return newMap;
+    });
 
     this.taildropService.pingPeer(peer.hostName).subscribe({
       next: (res) => {
-        this.peers.update(list => 
-          list.map(p => p.id === peer.id ? { 
-            ...p, 
-            pinging: false, 
+        this.peerLatencies.update(map => {
+          const newMap = new Map(map);
+          newMap.set(peer.id, {
             latency: res.latencyMs,
+            pinging: false,
             curAddr: res.direct ? 'Direct' : null,
-            relay: res.direct ? null : 'Relayed'
-          } : p)
-        );
+            relay: res.direct ? null : 'Relayed',
+          });
+          return newMap;
+        });
       },
       error: (err) => {
         console.error(`Ping failed for ${peer.hostName}:`, err);
-        this.peers.update(list => 
-          list.map(p => p.id === peer.id ? { ...p, pinging: false, latency: -1 } : p)
-        );
+        this.peerLatencies.update(map => {
+          const newMap = new Map(map);
+          newMap.set(peer.id, { latency: -1, pinging: false });
+          return newMap;
+        });
       }
     });
   }
 
-  // Handle file selection via file browser
   protected onFileSelected(event: Event) {
     const input = event.target as HTMLInputElement;
     if (input.files && input.files.length > 0) {
@@ -358,7 +353,6 @@ export class App implements OnInit, OnDestroy {
     }
   }
 
-  // Drag & Drop handlers
   protected onDragOver(event: DragEvent) {
     event.preventDefault();
     event.stopPropagation();
@@ -381,7 +375,6 @@ export class App implements OnInit, OnDestroy {
     }
   }
 
-  // Recursive HTML5 Directory Tree walker and compressor
   private async handleDropFilesAndDirectories(dataTransfer: DataTransfer) {
     const items = dataTransfer.items;
     if (!items) {
@@ -433,8 +426,7 @@ export class App implements OnInit, OnDestroy {
 
   private async zipDirectoryEntry(dirEntry: FileSystemDirectoryEntry): Promise<void> {
     const zip = new JSZip();
-    
-    // Add placeholder to queue indicating compression progress
+
     const queueId = Math.random().toString(36).substring(2, 9);
     this.selectedFiles.update(q => [...q, {
       id: queueId,
@@ -447,9 +439,8 @@ export class App implements OnInit, OnDestroy {
       await this.traverseDirectory(dirEntry, '', zip);
       const content = await zip.generateAsync({ type: 'blob' });
       const zippedFile = new File([content], `${dirEntry.name}.zip`, { type: 'application/zip' });
-      
-      // Update placeholder in queue
-      this.selectedFiles.update(items => 
+
+      this.selectedFiles.update(items =>
         items.map(item => item.id === queueId ? {
           ...item,
           file: zippedFile,
@@ -459,7 +450,7 @@ export class App implements OnInit, OnDestroy {
       );
     } catch (err) {
       console.error('Failed to zip folder:', err);
-      this.selectedFiles.update(items => 
+      this.selectedFiles.update(items =>
         items.map(item => item.id === queueId ? {
           ...item,
           status: 'error',
@@ -472,14 +463,14 @@ export class App implements OnInit, OnDestroy {
   private traverseDirectory(dirEntry: FileSystemDirectoryEntry, path: string, zip: JSZip): Promise<void> {
     return new Promise((resolve, reject) => {
       const reader = dirEntry.createReader();
-      
+
       const readEntries = () => {
         reader.readEntries(async (entries) => {
           if (entries.length === 0) {
             resolve();
             return;
           }
-          
+
           try {
             for (const entry of entries) {
               const relativePath = path ? `${path}/${entry.name}` : entry.name;
@@ -500,7 +491,7 @@ export class App implements OnInit, OnDestroy {
           }
         }, (err) => reject(err));
       };
-      
+
       readEntries();
     });
   }
@@ -520,7 +511,6 @@ export class App implements OnInit, OnDestroy {
     this.selectedFiles.update(items => items.filter(item => item.status !== 'success'));
   }
 
-  // Send all pending files in the queue sequentially via Taildrop
   protected triggerQueueTransfer() {
     const peer = this.selectedPeer();
     if (!peer || this.isTransferring()) return;
@@ -535,7 +525,7 @@ export class App implements OnInit, OnDestroy {
   private processNextInQueue(targetHostName: string, index: number, items: QueueItem[]) {
     if (index >= items.length) {
       this.isTransferring.set(false);
-      this.fetchInbox(); // Harvest any sent files if we sent them locally
+      this.inboxResource.reload();
       return;
     }
 
@@ -543,7 +533,7 @@ export class App implements OnInit, OnDestroy {
     this.updateItemStatus(item.id, 'sending', 'Sending...');
 
     this.taildropService.sendFile(targetHostName, item.file).subscribe({
-      next: (res) => {
+      next: () => {
         this.updateItemStatus(item.id, 'success', 'Sent');
         this.processNextInQueue(targetHostName, index + 1, items);
       },
@@ -557,12 +547,11 @@ export class App implements OnInit, OnDestroy {
   }
 
   private updateItemStatus(id: string, status: QueueItem['status'], message: string) {
-    this.selectedFiles.update(items => 
+    this.selectedFiles.update(items =>
       items.map(item => item.id === id ? { ...item, status, message } : item)
     );
   }
 
-  // Download a received file
   protected downloadFile(file: InboxFile) {
     const downloadUrl = `/api/download/${encodeURIComponent(file.filename)}`;
     const link = document.createElement('a');
@@ -573,12 +562,11 @@ export class App implements OnInit, OnDestroy {
     document.body.removeChild(link);
   }
 
-  // Delete a received file
   protected deleteFile(file: InboxFile) {
     if (confirm(`Are you sure you want to delete ${file.filename} from this server's inbox?`)) {
       this.taildropService.deleteFile(file.filename).subscribe({
         next: () => {
-          this.inboxFiles.update(files => files.filter(f => f.filename !== file.filename));
+          this.inboxResource.reload();
         },
         error: (err) => {
           console.error('Failed to delete file:', err);
@@ -588,14 +576,13 @@ export class App implements OnInit, OnDestroy {
     }
   }
 
-  // Server-side archive unzipping handler
   protected extractArchive(file: InboxFile) {
     if (confirm(`Extract folder contents from archive "${file.filename}"?`)) {
       this.loadingInbox.set(true);
       this.taildropService.extractZip(file.filename).subscribe({
         next: (res) => {
           alert(res.message);
-          this.fetchInbox();
+          this.inboxResource.reload();
         },
         error: (err) => {
           console.error('Failed to extract file:', err);
@@ -606,7 +593,6 @@ export class App implements OnInit, OnDestroy {
     }
   }
 
-  // Helper: Format file size
   protected formatBytes(bytes: number, decimals = 2): string {
     if (bytes === 0) return '0 Bytes';
     const k = 1024;
@@ -616,7 +602,6 @@ export class App implements OnInit, OnDestroy {
     return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
   }
 
-  // Helper: Format received date
   protected formatDate(dateStr: string): string {
     const date = new Date(dateStr);
     return date.toLocaleString(undefined, {
@@ -628,13 +613,11 @@ export class App implements OnInit, OnDestroy {
     });
   }
 
-  // Helper: Detect if peer is a LocalSend device
   protected isLocalSend(peer: Peer | null): boolean {
     if (!peer) return false;
     return peer.id.startsWith('localsend-') || peer.relay === 'LocalSend Protocol';
   }
 
-  // Helper: Get OS Icon class/color
   protected getOsColor(osName: string): string {
     const name = osName.toLowerCase();
     if (name.includes('mac') || name.includes('ios') || name.includes('apple') || name.includes('tvos')) {
@@ -652,10 +635,9 @@ export class App implements OnInit, OnDestroy {
     return 'var(--text-muted)';
   }
 
-  // Helper: Get File icon color and type based on extension
   protected getFileTypeDetails(filename: string): { type: string, icon: string } {
     const ext = filename.split('.').pop()?.toLowerCase() || '';
-    
+
     const images = ['jpg', 'jpeg', 'png', 'gif', 'svg', 'webp', 'bmp', 'ico'];
     const videos = ['mp4', 'mkv', 'avi', 'mov', 'webm', 'flv'];
     const audio = ['mp3', 'wav', 'ogg', 'm4a', 'flac', 'aac'];

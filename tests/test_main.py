@@ -525,3 +525,26 @@ def test_localsend_upload_logging_integration(mock_copyfileobj):
         assert history_data[0]["protocol"] == "LocalSend"
         assert history_data[0]["peer_name"] == "Test iPhone (LocalSend)"
 
+
+@patch('server.main.query_local_api')
+@patch('server.main.scan_local_subnet')
+def test_scan_network_endpoint(mock_scan, mock_query):
+    async def side_effect(path):
+        if path == "/localapi/v0/status":
+            return MOCK_STATUS_DATA
+        elif path == "/localapi/v0/file-targets":
+            return MOCK_TARGETS_DATA
+        return None
+    mock_query.side_effect = side_effect
+    
+    async def fake_scan():
+        pass
+    mock_scan.side_effect = fake_scan
+
+    response = client.post("/api/scan")
+    assert response.status_code == 200
+    data = response.json()
+    assert "self" in data
+    assert "peers" in data
+
+
